@@ -33,7 +33,7 @@ load_dotenv()
 
 # Revenue goals (monthly) — adjust as needed
 EMAIL_GOAL = 60_000.0
-INFLUENCER_GOAL = 25_000.0
+INFLUENCER_GOAL = 85_600.0
 PAID_GOAL = 30_000.0
 
 
