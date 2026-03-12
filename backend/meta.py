@@ -160,9 +160,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                     raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
                     if raw_thumb:
                         best = _extract_best_url(raw_thumb)
-                        cid  = chunk[j]
-                        for ad_id in creative_to_ad_ids.get(cid, []):
-                            thumbnails[ad_id] = best
+                        thumbnails[chunk[j]] = best  # keyed by creative_id
                 except Exception:
                     pass
 
@@ -170,10 +168,17 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     except Exception as e:
         print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
 
-    # Deduplicate by ad_id — sum spend/impressions/clicks/revenue/orders
+    # Build reverse mapping: ad_id → creative_id
+    ad_to_creative: dict[str, str] = {}
+    for cid, ad_ids in creative_to_ad_ids.items():
+        for aid in ad_ids:
+            ad_to_creative[aid] = cid
+
+    # Deduplicate by creative_id — sum spend/impressions/clicks/revenue/orders
     by_creative: dict[str, dict] = {}
     for row in raw_rows:
-        creative_id   = row.get("ad_id", "unknown")
+        ad_id         = row.get("ad_id", "unknown")
+        creative_id   = ad_to_creative.get(ad_id, ad_id)
         creative_name = row.get("ad_name", "Unknown Ad")
         thumbnail_url = thumbnails.get(creative_id, "")
 
@@ -188,7 +193,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 "creative_id":    creative_id,
                 "creative_name":  creative_name,
                 "thumbnail_url":  thumbnail_url,
-                "created_time":   ad_created_times.get(creative_id, ""),
+                "created_time":   ad_created_times.get(ad_id, ""),
                 "spend":          0.0,
                 "impressions":    0,
                 "clicks":         0,
