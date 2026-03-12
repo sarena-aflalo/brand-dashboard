@@ -109,16 +109,19 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
 
     print(f"[meta] total ad rows fetched: {len(raw_rows)}", flush=True)
 
-    # Step 1: batch-fetch creative IDs + created_time from ad IDs
+    # Batch-fetch creative ID + thumbnail + created_time directly from ad objects.
+    # Using creative{id,thumbnail_url} avoids a separate adcreative API call
+    # (which requires elevated token permissions not always available in production).
     ad_to_creative: dict[str, str] = {}   # ad_id → creative_id
     ad_created_times: dict[str, str] = {} # ad_id → created_time
+    thumbnails: dict[str, str] = {}       # creative_id → thumbnail url
     CHUNK = 50
     all_ad_ids = list({row["ad_id"] for row in raw_rows if row.get("ad_id")})
     try:
         for i in range(0, len(all_ad_ids), CHUNK):
             chunk = all_ad_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id}}"}
+                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id,thumbnail_url,picture}}"}
                 for aid in chunk
             ]
             batch_params = _base_params()
@@ -133,50 +136,20 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 try:
                     body = json.loads(item["body"])
                     aid = chunk[j]
-                    cid = body.get("creative", {}).get("id")
+                    creative = body.get("creative", {})
+                    cid = creative.get("id")
                     if cid:
                         ad_to_creative[aid] = cid
+                        raw_thumb = creative.get("thumbnail_url", "") or creative.get("picture", "")
+                        if raw_thumb and cid not in thumbnails:
+                            thumbnails[cid] = _extract_best_url(raw_thumb)
                     if body.get("created_time"):
                         ad_created_times[aid] = body["created_time"]
                 except Exception:
                     pass
-        print(f"[meta] creative IDs resolved: {len(ad_to_creative)}", flush=True)
+        print(f"[meta] creative IDs resolved: {len(ad_to_creative)}, thumbnails: {len(thumbnails)}", flush=True)
     except Exception as e:
         print(f"[meta] ad batch error (non-fatal): {e}", flush=True)
-
-    # Step 2: batch-fetch thumbnails directly from creative IDs
-    thumbnails: dict[str, str] = {}  # creative_id → thumbnail url
-    unique_creative_ids = list(set(ad_to_creative.values()))
-    print(f"[meta] unique creative IDs to fetch: {len(unique_creative_ids)}", flush=True)
-    if unique_creative_ids:
-        print(f"[meta] sample creative IDs: {unique_creative_ids[:3]}", flush=True)
-    try:
-        for i in range(0, len(unique_creative_ids), CHUNK):
-            chunk = unique_creative_ids[i : i + CHUNK]
-            batch = [
-                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture"}
-                for cid in chunk
-            ]
-            batch_params = _base_params()
-            batch_params["batch"] = json.dumps(batch)
-            resp = await client.post(BASE_URL, data=batch_params)
-            print(f"[meta] thumb batch {i//CHUNK+1} status={resp.status_code}", flush=True)
-            if resp.status_code != 200:
-                continue
-            for j, item in enumerate(resp.json()):
-                if not item or item.get("code") != 200:
-                    print(f"[meta] thumb item failed: {str(item)[:400]}", flush=True)
-                    continue
-                try:
-                    body = json.loads(item["body"])
-                    raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
-                    if raw_thumb:
-                        thumbnails[chunk[j]] = _extract_best_url(raw_thumb)
-                except Exception:
-                    pass
-        print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
-    except Exception as e:
-        print(f"[meta] thumb batch error (non-fatal): {e}", flush=True)
 
     # Deduplicate by creative_id — sum spend/impressions/clicks/revenue/orders
     by_creative: dict[str, dict] = {}
