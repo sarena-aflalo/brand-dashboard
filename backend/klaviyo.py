@@ -400,7 +400,7 @@ async def _fetch_flow_performance(client: httpx.AsyncClient) -> list[dict]:
                 "timeframe": {"start": start, "end": end},
                 "filter": f"contains-any(flow_id,[{','.join(repr(i) for i in flow_ids)}])",
                 "statistics": ["recipients", "conversion_value"],
-                "group_by": ["flow_id"],
+                "group_by": ["flow_id", "flow_message_id"],
             },
         }
     }
@@ -761,6 +761,7 @@ async def get_weekly_email_revenue(client: httpx.AsyncClient) -> list[dict]:
                         "timeframe": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
                         "filter": f"contains-any(flow_id,[{','.join(repr(i) for i in flow_ids)}])",
                         "statistics": ["conversion_value"],
+                        "group_by": ["flow_id", "flow_message_id"],
                     },
                 }
             }
