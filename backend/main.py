@@ -243,11 +243,39 @@ async def paid_all_creatives():
 
 @app.get("/api/debug/thumbnails")
 async def debug_thumbnails():
-    """Returns first 5 creatives with their raw thumbnail_url values for debugging."""
-    async with _http_client() as client:
-        data = await meta._fetch_all_creatives(client)
-    sample = [{"creative_id": c["creative_id"], "creative_name": c["creative_name"], "thumbnail_url": c["thumbnail_url"]} for c in data[:5]]
-    return {"count": len(data), "with_thumbnail": sum(1 for c in data if c["thumbnail_url"]), "sample": sample}
+    """Tests fetching one creative thumbnail directly and returns the full response."""
+    import json as _json
+    token = os.getenv("META_ACCESS_TOKEN", "")
+    account_id = os.getenv("META_AD_ACCOUNT_ID", "")
+    base = "https://graph.facebook.com/v19.0"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Step 1: get one ad with its creative ID
+        r = await client.get(f"{base}/act_{account_id}/ads", params={
+            "access_token": token,
+            "fields": "id,creative{id}",
+            "limit": "1",
+        })
+        ads_body = r.json()
+        ad = ads_body.get("data", [{}])[0]
+        creative_id = ad.get("creative", {}).get("id", "")
+
+        if not creative_id:
+            return {"error": "no creative id found", "ads_response": ads_body}
+
+        # Step 2: try direct GET (not batch) on the creative
+        r2 = await client.get(f"{base}/{creative_id}", params={
+            "access_token": token,
+            "fields": "thumbnail_url,picture",
+            "thumbnail_width": "400",
+            "thumbnail_height": "400",
+        })
+
+        return {
+            "creative_id": creative_id,
+            "direct_get_status": r2.status_code,
+            "direct_get_body": r2.json(),
+        }
 
 
 @app.get("/api/paid/creatives")
