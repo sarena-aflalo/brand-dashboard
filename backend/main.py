@@ -224,6 +224,23 @@ async def influencer_creators():
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/paid/all-creatives")
+async def paid_all_creatives():
+    try:
+        async with _http_client() as client:
+            data = await meta._fetch_all_creatives(client)
+        return {"status": "ok", "data": data}
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Meta API error: {e.response.text}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/paid/creatives")
 async def paid_creatives():
     try:

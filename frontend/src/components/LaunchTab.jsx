@@ -1,30 +1,36 @@
+import { useEffect, useState } from 'react'
+
+// Each launch defines its published window — creatives created within
+// that range are considered part of that launch.
 const LAUNCHES = [
   {
     id: 'denim-leather',
     name: 'Denim + Leather',
     window: 'Jan 22 – Feb 11, 2026',
-    image: null, // replace with proxied thumbnail URL if desired
-    creatives: 17,
+    publishedStart: '2026-01-23',
+    publishedEnd:   '2026-01-27',
     published: 'Jan 23 – Jan 27',
-    spend: 17179,
-    revenue: 66670,
-    roas: 3.88,
-    ctr: 2.22,
-    aov: 995,
+    creatives: 17,
+    spend:     17179,
+    revenue:   66670,
+    roas:      3.88,
+    ctr:       2.22,
+    aov:       995,
     purchases: 67,
   },
   {
     id: 'pre-spring',
     name: 'Pre Spring',
     window: 'Feb 9 – Mar 1, 2026',
-    image: null,
-    creatives: 15,
+    publishedStart: '2026-02-10',
+    publishedEnd:   '2026-02-14',
     published: 'Feb 12',
-    spend: 15143,
-    revenue: 32619,
-    roas: 2.15,
-    ctr: 1.36,
-    aov: 815,
+    creatives: 15,
+    spend:     15143,
+    revenue:   32619,
+    roas:      2.15,
+    ctr:       1.36,
+    aov:       815,
     purchases: 40,
   },
 ]
@@ -40,11 +46,23 @@ const METRICS = [
   { key: 'purchases', label: 'Purchases', format: (v) => v },
 ]
 
-function ImageCell({ image, name }) {
-  if (image) {
+function pickThumbnail(allCreatives, publishedStart, publishedEnd) {
+  const start = new Date(publishedStart)
+  const end   = new Date(publishedEnd + 'T23:59:59Z')
+  // Find any creative published within the window that has a thumbnail
+  const match = allCreatives.find((c) => {
+    if (!c.thumbnail_url || !c.created_time) return false
+    const d = new Date(c.created_time)
+    return d >= start && d <= end
+  })
+  return match?.thumbnail_url ?? null
+}
+
+function ImageCell({ url, name }) {
+  if (url) {
     return (
       <img
-        src={`/api/proxy/image?url=${encodeURIComponent(image)}`}
+        src={`/api/proxy/image?url=${encodeURIComponent(url)}`}
         alt={name}
         className="w-full aspect-square object-cover rounded"
       />
@@ -61,6 +79,22 @@ function ImageCell({ image, name }) {
 }
 
 export default function LaunchTab() {
+  const [thumbnails, setThumbnails] = useState({}) // launch id → url
+
+  useEffect(() => {
+    fetch('/api/paid/all-creatives')
+      .then((r) => r.ok ? r.json() : null)
+      .then((j) => {
+        if (!j?.data) return
+        const result = {}
+        for (const launch of LAUNCHES) {
+          result[launch.id] = pickThumbnail(j.data, launch.publishedStart, launch.publishedEnd)
+        }
+        setThumbnails(result)
+      })
+      .catch(() => {})
+  }, [])
+
   return (
     <div className="space-y-1">
       <div className="mb-6">
@@ -75,7 +109,6 @@ export default function LaunchTab() {
             {LAUNCHES.map((l) => <col key={l.id} />)}
           </colgroup>
 
-          {/* Launch header row */}
           <thead>
             <tr className="border-b border-gray-100">
               <th className="py-4 px-5" />
@@ -95,7 +128,7 @@ export default function LaunchTab() {
               {LAUNCHES.map((launch) => (
                 <td key={launch.id} className="py-4 px-5">
                   <div className="max-w-[120px] ml-auto">
-                    <ImageCell image={launch.image} name={launch.name} />
+                    <ImageCell url={thumbnails[launch.id] ?? null} name={launch.name} />
                   </div>
                 </td>
               ))}
