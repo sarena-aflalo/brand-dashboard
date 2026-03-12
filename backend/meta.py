@@ -159,7 +159,11 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                     body = json.loads(item["body"])
                     raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
                     if raw_thumb:
-                        thumbnails[chunk[j]] = _extract_best_url(raw_thumb)
+                        best = _extract_best_url(raw_thumb)
+                        cid = chunk[j]
+                        thumbnails[cid] = best  # keyed by creative_id
+                        for aid in creative_to_ad_ids.get(cid, []):
+                            thumbnails[aid] = best  # also keyed by ad_id as fallback
                 except Exception:
                     pass
 
