@@ -117,7 +117,12 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     creative_to_ad_ids: dict[str, list[str]] = {}
     try:
         ad_params = _base_params()
-        ad_params.update({"fields": "id,created_time,creative{id,thumbnail_url,picture}", "limit": "500"})
+        ad_params.update({
+            "fields": "id,created_time,creative{id,thumbnail_url,picture}",
+            "thumbnail_width": "1080",
+            "thumbnail_height": "1080",
+            "limit": "500",
+        })
         ads_url = f"{BASE_URL}/act_{account_id}/ads"
 
         while ads_url:
