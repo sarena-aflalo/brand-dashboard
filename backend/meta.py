@@ -147,11 +147,14 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     # Step 2: batch-fetch thumbnails directly from creative IDs
     thumbnails: dict[str, str] = {}  # creative_id → thumbnail url
     unique_creative_ids = list(set(ad_to_creative.values()))
+    print(f"[meta] unique creative IDs to fetch: {len(unique_creative_ids)}", flush=True)
+    if unique_creative_ids:
+        print(f"[meta] sample creative IDs: {unique_creative_ids[:3]}", flush=True)
     try:
         for i in range(0, len(unique_creative_ids), CHUNK):
             chunk = unique_creative_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture&thumbnail_width=1080&thumbnail_height=1080"}
+                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture"}
                 for cid in chunk
             ]
             batch_params = _base_params()
@@ -162,7 +165,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
-                    print(f"[meta] thumb item failed: {str(item)[:150]}", flush=True)
+                    print(f"[meta] thumb item failed: {str(item)[:400]}", flush=True)
                     continue
                 try:
                     body = json.loads(item["body"])
