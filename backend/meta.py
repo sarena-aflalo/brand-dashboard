@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 from datetime import datetime, timezone
 
 BASE_URL = "https://graph.facebook.com/v19.0"
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 1800  # 30 minutes
 
 _cache: dict[str, tuple[float, object]] = {}
 
@@ -111,12 +111,13 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
 
     # Fetch creative IDs per ad, then batch-fetch 1080px thumbnails
     thumbnails: dict[str, str] = {}
+    creative_to_ad_ids: dict[str, list[str]] = {}
+    ad_created_times: dict[str, str] = {}
+    video_urls: dict[str, str] = {}
     try:
         ad_params = _base_params()
         ad_params.update({"fields": "id,created_time,creative{id}", "limit": "500"})
         ads_url = f"{BASE_URL}/act_{account_id}/ads"
-        creative_to_ad_ids: dict[str, list[str]] = {}
-        ad_created_times: dict[str, str] = {}
 
         while ads_url:
             r = await client.get(ads_url, params=ad_params)
@@ -194,7 +195,6 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
         print(f"[meta] video sources resolved: {len(video_urls)}", flush=True)
     except Exception as e:
         print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
-        video_urls = {}
 
     # Build reverse mapping: ad_id → creative_id
     ad_to_creative: dict[str, str] = {}

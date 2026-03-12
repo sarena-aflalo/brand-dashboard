@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://a.klaviyo.com/api"
 REVISION = "2024-02-15"
-CACHE_TTL = 300  # seconds (5 minutes)
+CACHE_TTL = 1800  # seconds (30 minutes)
 
 _cache: dict[str, tuple[float, object]] = {}
 _fetch_lock = asyncio.Lock()   # prevents concurrent campaign report calls on cold start

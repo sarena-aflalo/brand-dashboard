@@ -73,8 +73,27 @@ def _retail_month_paced_goal(goal: float) -> float:
     return goal * days_elapsed / total_days
 
 
+async def _warmup():
+    """Pre-fetch all data on startup so the first real request is fast."""
+    try:
+        async with _http_client() as client:
+            await asyncio.gather(
+                klaviyo.get_campaign_performance(client),
+                klaviyo.get_flow_performance(client),
+                klaviyo.get_subscriber_growth(client),
+                klaviyo.get_weekly_email_revenue(client),
+                shopmy.get_creator_performance(client),
+                meta.get_creative_performance(client),
+                return_exceptions=True,
+            )
+        print("[warmup] all data pre-fetched", flush=True)
+    except Exception as e:
+        print(f"[warmup] error (non-fatal): {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    asyncio.create_task(_warmup())
     yield
 
 

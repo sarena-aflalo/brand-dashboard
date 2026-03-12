@@ -20,7 +20,7 @@ import httpx
 from datetime import datetime, timezone
 
 BASE_URL = "https://api.shopmy.us/v1"
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 1800  # 30 minutes
 
 _cache: dict[str, tuple[float, object]] = {}
 
