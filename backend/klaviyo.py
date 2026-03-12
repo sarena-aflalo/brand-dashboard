@@ -33,14 +33,30 @@ _last_post_time: float = 0.0
 
 
 async def _rate_limited_post(client: httpx.AsyncClient, url: str, **kwargs):
-    """Wrapper for POST calls that enforces a minimum gap to avoid 429s."""
+    """Wrapper for POST calls that enforces a minimum gap and retries on 429."""
     global _last_post_time
     async with _rate_lock:
-        wait = 1.5 - (time.time() - _last_post_time)
+        wait = 2.0 - (time.time() - _last_post_time)
         if wait > 0:
             await asyncio.sleep(wait)
         resp = await client.post(url, **kwargs)
         _last_post_time = time.time()
+
+        if resp.status_code == 429:
+            retry_after = 15
+            try:
+                detail = resp.json().get("errors", [{}])[0].get("detail", "")
+                import re
+                m = re.search(r"(\d+) seconds", detail)
+                if m:
+                    retry_after = int(m.group(1)) + 2
+            except Exception:
+                pass
+            print(f"[klaviyo] 429 throttled, retrying in {retry_after}s", flush=True)
+            await asyncio.sleep(retry_after)
+            resp = await client.post(url, **kwargs)
+            _last_post_time = time.time()
+
     return resp
 
 
