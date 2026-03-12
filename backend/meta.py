@@ -141,7 +141,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
         for i in range(0, len(creative_ids), CHUNK):
             chunk = creative_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url&thumbnail_width=1080&thumbnail_height=1080"}
+                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture&thumbnail_width=1080&thumbnail_height=1080"}
                 for cid in chunk
             ]
             batch_params = _base_params()
@@ -153,10 +153,11 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
+                    print(f"[meta] batch item {i+j} failed code={item.get('code') if item else None}: {str(item)[:200]}", flush=True)
                     continue
                 try:
                     body = json.loads(item["body"])
-                    raw_thumb = body.get("thumbnail_url", "")
+                    raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
                     if raw_thumb:
                         best = _extract_best_url(raw_thumb)
                         cid  = chunk[j]

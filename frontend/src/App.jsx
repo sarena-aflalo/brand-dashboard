@@ -8,7 +8,7 @@ import PaidTab from './components/PaidTab'
 const TABS = [
   { id: 'email', label: 'Email' },
   { id: 'influencer', label: 'Influencer' },
-  { id: 'paid', label: 'Creatives' },
+  { id: 'paid', label: 'Creative' },
 ]
 
 export default function App() {
