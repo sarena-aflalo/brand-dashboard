@@ -266,7 +266,7 @@ async def debug_thumbnails():
         # Step 2: try direct GET (not batch) on the creative
         r2 = await client.get(f"{base}/{creative_id}", params={
             "access_token": token,
-            "fields": "thumbnail_url,picture",
+            "fields": "thumbnail_url",
             "thumbnail_width": "400",
             "thumbnail_height": "400",
         })

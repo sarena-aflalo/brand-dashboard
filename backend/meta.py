@@ -118,7 +118,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     try:
         ad_params = _base_params()
         ad_params.update({
-            "fields": "id,created_time,creative{id,thumbnail_url,picture}",
+            "fields": "id,created_time,creative{id,thumbnail_url}",
             "thumbnail_width": "1080",
             "thumbnail_height": "1080",
             "limit": "500",
@@ -137,7 +137,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 creative_id = creative.get("id")
                 if creative_id:
                     creative_to_ad_ids.setdefault(creative_id, []).append(ad_id)
-                    raw_thumb = creative.get("thumbnail_url", "") or creative.get("picture", "")
+                    raw_thumb = creative.get("thumbnail_url", "")
                     if raw_thumb and creative_id not in thumbnails:
                         thumbnails[creative_id] = _extract_best_url(raw_thumb)
                 if ad.get("created_time"):
