@@ -260,7 +260,15 @@ function AlwaysOnFlows() {
       {error && <ErrorMsg msg={error} />}
       {data && (
         <div className="grid grid-cols-3 gap-4">
-          {data.map((flow) => (
+          {[...data].sort((a, b) => {
+            const order = ['abandoned cart', 'triple pixel', 'abandoned checkout', 'back in stock']
+            const rank = (name) => {
+              const n = name.toLowerCase()
+              const i = order.findIndex((kw) => n.includes(kw))
+              return i === -1 ? 99 : i
+            }
+            return rank(a.name) - rank(b.name)
+          }).map((flow) => (
             <FlowCard key={flow.id || flow.name} flow={flow} />
           ))}
         </div>
