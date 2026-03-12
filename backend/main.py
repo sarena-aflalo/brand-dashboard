@@ -241,6 +241,15 @@ async def paid_all_creatives():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/debug/thumbnails")
+async def debug_thumbnails():
+    """Returns first 5 creatives with their raw thumbnail_url values for debugging."""
+    async with _http_client() as client:
+        data = await meta._fetch_all_creatives(client)
+    sample = [{"creative_id": c["creative_id"], "creative_name": c["creative_name"], "thumbnail_url": c["thumbnail_url"]} for c in data[:5]]
+    return {"count": len(data), "with_thumbnail": sum(1 for c in data if c["thumbnail_url"]), "sample": sample}
+
+
 @app.get("/api/paid/creatives")
 async def paid_creatives():
     try:
