@@ -37,7 +37,6 @@ function AdCard({ ad, rank }) {
             </div>
         }
       </div>
-      <p className="text-xs text-gray-700 font-medium leading-snug line-clamp-2">{ad.creative_name}</p>
     </div>
   )
 }

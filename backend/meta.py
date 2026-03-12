@@ -109,40 +109,18 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
 
     print(f"[meta] total ad rows fetched: {len(raw_rows)}", flush=True)
 
-    # Fetch creative IDs per ad, then batch-fetch 1080px thumbnails
-    thumbnails: dict[str, str] = {}
-    creative_to_ad_ids: dict[str, list[str]] = {}
-    ad_created_times: dict[str, str] = {}
+    # Batch-fetch creative ID + thumbnail directly from each ad_id (no separate ads API call)
+    thumbnails: dict[str, str] = {}       # ad_id → thumbnail url
+    ad_to_creative: dict[str, str] = {}   # ad_id → creative_id
+    ad_created_times: dict[str, str] = {} # ad_id → created_time
+    CHUNK = 50
+    all_ad_ids = list({row["ad_id"] for row in raw_rows if row.get("ad_id")})
     try:
-        ad_params = _base_params()
-        ad_params.update({"fields": "id,created_time,creative{id}", "limit": "500"})
-        ads_url = f"{BASE_URL}/act_{account_id}/ads"
-
-        while ads_url:
-            r = await client.get(ads_url, params=ad_params)
-            if r.status_code != 200:
-                print(f"[meta] ads fetch failed {r.status_code}: {r.text[:200]}", flush=True)
-                break
-            body = r.json()
-            for ad in body.get("data", []):
-                ad_id       = ad["id"]
-                creative    = ad.get("creative", {})
-                creative_id = creative.get("id")
-                if creative_id:
-                    creative_to_ad_ids.setdefault(creative_id, []).append(ad_id)
-                if ad.get("created_time"):
-                    ad_created_times[ad_id] = ad["created_time"]
-            ads_url   = body.get("paging", {}).get("next")
-            ad_params = {}
-
-        # Batch-fetch 1080px thumbnails in chunks of 50
-        creative_ids = list(creative_to_ad_ids.keys())
-        CHUNK = 50
-        for i in range(0, len(creative_ids), CHUNK):
-            chunk = creative_ids[i : i + CHUNK]
+        for i in range(0, len(all_ad_ids), CHUNK):
+            chunk = all_ad_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture&thumbnail_width=1080&thumbnail_height=1080"}
-                for cid in chunk
+                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id,thumbnail_url,picture}}&thumbnail_width=1080&thumbnail_height=1080"}
+                for aid in chunk
             ]
             batch_params = _base_params()
             batch_params["batch"] = json.dumps(batch)
@@ -153,29 +131,23 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
-                    print(f"[meta] batch item {i+j} failed code={item.get('code') if item else None}: {str(item)[:200]}", flush=True)
                     continue
                 try:
                     body = json.loads(item["body"])
-                    raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
+                    aid = chunk[j]
+                    creative = body.get("creative", {})
+                    raw_thumb = creative.get("thumbnail_url", "") or creative.get("picture", "")
                     if raw_thumb:
-                        best = _extract_best_url(raw_thumb)
-                        cid = chunk[j]
-                        thumbnails[cid] = best  # keyed by creative_id
-                        for aid in creative_to_ad_ids.get(cid, []):
-                            thumbnails[aid] = best  # also keyed by ad_id as fallback
+                        thumbnails[aid] = _extract_best_url(raw_thumb)
+                    if creative.get("id"):
+                        ad_to_creative[aid] = creative["id"]
+                    if body.get("created_time"):
+                        ad_created_times[aid] = body["created_time"]
                 except Exception:
                     pass
-
         print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
     except Exception as e:
         print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
-
-    # Build reverse mapping: ad_id → creative_id
-    ad_to_creative: dict[str, str] = {}
-    for cid, ad_ids in creative_to_ad_ids.items():
-        for aid in ad_ids:
-            ad_to_creative[aid] = cid
 
     # Deduplicate by creative_id — sum spend/impressions/clicks/revenue/orders
     by_creative: dict[str, dict] = {}
@@ -183,7 +155,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
         ad_id         = row.get("ad_id", "unknown")
         creative_id   = ad_to_creative.get(ad_id, ad_id)
         creative_name = row.get("ad_name", "Unknown Ad")
-        thumbnail_url = thumbnails.get(creative_id, "")
+        thumbnail_url = thumbnails.get(ad_id, "")
 
         spend       = float(row.get("spend", 0) or 0)
         impressions = int(row.get("impressions", 0) or 0)
