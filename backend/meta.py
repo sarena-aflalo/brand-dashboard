@@ -113,7 +113,6 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     thumbnails: dict[str, str] = {}
     creative_to_ad_ids: dict[str, list[str]] = {}
     ad_created_times: dict[str, str] = {}
-    video_urls: dict[str, str] = {}
     try:
         ad_params = _base_params()
         ad_params.update({"fields": "id,created_time,creative{id}", "limit": "500"})
@@ -136,7 +135,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
             ads_url   = body.get("paging", {}).get("next")
             ad_params = {}
 
-        # Batch 1: thumbnails only (separate from video_id to avoid batch failures)
+        # Batch-fetch 1080px thumbnails in chunks of 50
         creative_ids = list(creative_to_ad_ids.keys())
         CHUNK = 50
         for i in range(0, len(creative_ids), CHUNK):
@@ -148,12 +147,13 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
             batch_params = _base_params()
             batch_params["batch"] = json.dumps(batch)
             resp = await client.post(BASE_URL, data=batch_params)
-            print(f"[meta] thumb batch {i//CHUNK+1} status={resp.status_code}", flush=True)
+            print(f"[meta] batch chunk {i//CHUNK+1} status={resp.status_code}", flush=True)
             if resp.status_code != 200:
+                print(f"[meta] batch error: {resp.text[:200]}", flush=True)
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
-                    print(f"[meta] thumb item {i+j} failed code={item.get('code') if item else None}: {str(item)[:200]}", flush=True)
+                    print(f"[meta] batch item {i+j} failed code={item.get('code') if item else None}: {str(item)[:200]}", flush=True)
                     continue
                 try:
                     body = json.loads(item["body"])
@@ -164,53 +164,6 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                     pass
 
         print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
-
-        # Batch 2: video_id only
-        creative_video_ids: dict[str, str] = {}
-        for i in range(0, len(creative_ids), CHUNK):
-            chunk = creative_ids[i : i + CHUNK]
-            batch = [
-                {"method": "GET", "relative_url": f"{cid}?fields=video_id"}
-                for cid in chunk
-            ]
-            batch_params = _base_params()
-            batch_params["batch"] = json.dumps(batch)
-            resp = await client.post(BASE_URL, data=batch_params)
-            if resp.status_code == 200:
-                for j, item in enumerate(resp.json()):
-                    if not item or item.get("code") != 200:
-                        continue
-                    try:
-                        body = json.loads(item["body"])
-                        if body.get("video_id"):
-                            creative_video_ids[chunk[j]] = body["video_id"]
-                    except Exception:
-                        pass
-
-        print(f"[meta] video creatives: {len(creative_video_ids)}", flush=True)
-
-        # Batch 3: video source URLs
-        vid_items = list(creative_video_ids.items())
-        for i in range(0, len(vid_items), CHUNK):
-            chunk_vids = vid_items[i : i + CHUNK]
-            batch = [
-                {"method": "GET", "relative_url": f"{vid}?fields=source"}
-                for _, vid in chunk_vids
-            ]
-            batch_params = _base_params()
-            batch_params["batch"] = json.dumps(batch)
-            resp = await client.post(BASE_URL, data=batch_params)
-            if resp.status_code == 200:
-                for j, item in enumerate(resp.json()):
-                    if not item or item.get("code") != 200:
-                        continue
-                    try:
-                        src = json.loads(item["body"]).get("source", "")
-                        if src:
-                            video_urls[chunk_vids[j][0]] = src
-                    except Exception:
-                        pass
-        print(f"[meta] video sources resolved: {len(video_urls)}", flush=True)
     except Exception as e:
         print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
 
@@ -239,7 +192,6 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 "creative_id":    creative_id,
                 "creative_name":  creative_name,
                 "thumbnail_url":  thumbnail_url,
-                "video_url":      video_urls.get(creative_id, ""),
                 "created_time":   ad_created_times.get(ad_id, ""),
                 "spend":          0.0,
                 "impressions":    0,
@@ -265,7 +217,6 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
             "creative_id":   c["creative_id"],
             "creative_name": c["creative_name"],
             "thumbnail_url": c["thumbnail_url"],
-            "video_url":     c["video_url"],
             "created_time":  c["created_time"],
             "spend":         spend,
             "revenue":       rev,
