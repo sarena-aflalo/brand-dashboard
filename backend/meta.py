@@ -109,8 +109,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
 
     print(f"[meta] total ad rows fetched: {len(raw_rows)}", flush=True)
 
-    # Batch-fetch creative ID + thumbnail directly from each ad_id (no separate ads API call)
-    thumbnails: dict[str, str] = {}       # ad_id → thumbnail url
+    # Step 1: batch-fetch creative IDs + created_time from ad IDs
     ad_to_creative: dict[str, str] = {}   # ad_id → creative_id
     ad_created_times: dict[str, str] = {} # ad_id → created_time
     CHUNK = 50
@@ -119,15 +118,14 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
         for i in range(0, len(all_ad_ids), CHUNK):
             chunk = all_ad_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id,thumbnail_url,picture}}&thumbnail_width=1080&thumbnail_height=1080"}
+                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id}}"}
                 for aid in chunk
             ]
             batch_params = _base_params()
             batch_params["batch"] = json.dumps(batch)
             resp = await client.post(BASE_URL, data=batch_params)
-            print(f"[meta] batch chunk {i//CHUNK+1} status={resp.status_code}", flush=True)
+            print(f"[meta] ad batch {i//CHUNK+1} status={resp.status_code}", flush=True)
             if resp.status_code != 200:
-                print(f"[meta] batch error: {resp.text[:200]}", flush=True)
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
@@ -135,19 +133,47 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 try:
                     body = json.loads(item["body"])
                     aid = chunk[j]
-                    creative = body.get("creative", {})
-                    raw_thumb = creative.get("thumbnail_url", "") or creative.get("picture", "")
-                    if raw_thumb:
-                        thumbnails[aid] = _extract_best_url(raw_thumb)
-                    if creative.get("id"):
-                        ad_to_creative[aid] = creative["id"]
+                    cid = body.get("creative", {}).get("id")
+                    if cid:
+                        ad_to_creative[aid] = cid
                     if body.get("created_time"):
                         ad_created_times[aid] = body["created_time"]
                 except Exception:
                     pass
+        print(f"[meta] creative IDs resolved: {len(ad_to_creative)}", flush=True)
+    except Exception as e:
+        print(f"[meta] ad batch error (non-fatal): {e}", flush=True)
+
+    # Step 2: batch-fetch thumbnails directly from creative IDs
+    thumbnails: dict[str, str] = {}  # creative_id → thumbnail url
+    unique_creative_ids = list(set(ad_to_creative.values()))
+    try:
+        for i in range(0, len(unique_creative_ids), CHUNK):
+            chunk = unique_creative_ids[i : i + CHUNK]
+            batch = [
+                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture&thumbnail_width=1080&thumbnail_height=1080"}
+                for cid in chunk
+            ]
+            batch_params = _base_params()
+            batch_params["batch"] = json.dumps(batch)
+            resp = await client.post(BASE_URL, data=batch_params)
+            print(f"[meta] thumb batch {i//CHUNK+1} status={resp.status_code}", flush=True)
+            if resp.status_code != 200:
+                continue
+            for j, item in enumerate(resp.json()):
+                if not item or item.get("code") != 200:
+                    print(f"[meta] thumb item failed: {str(item)[:150]}", flush=True)
+                    continue
+                try:
+                    body = json.loads(item["body"])
+                    raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
+                    if raw_thumb:
+                        thumbnails[chunk[j]] = _extract_best_url(raw_thumb)
+                except Exception:
+                    pass
         print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
     except Exception as e:
-        print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
+        print(f"[meta] thumb batch error (non-fatal): {e}", flush=True)
 
     # Deduplicate by creative_id — sum spend/impressions/clicks/revenue/orders
     by_creative: dict[str, dict] = {}
@@ -155,7 +181,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
         ad_id         = row.get("ad_id", "unknown")
         creative_id   = ad_to_creative.get(ad_id, ad_id)
         creative_name = row.get("ad_name", "Unknown Ad")
-        thumbnail_url = thumbnails.get(ad_id, "")
+        thumbnail_url = thumbnails.get(creative_id, "")
 
         spend       = float(row.get("spend", 0) or 0)
         impressions = int(row.get("impressions", 0) or 0)
