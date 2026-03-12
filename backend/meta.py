@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 from datetime import datetime, timezone
 
 BASE_URL = "https://graph.facebook.com/v19.0"
-CACHE_TTL = 1800  # 30 minutes
+CACHE_TTL = 300  # 5 minutes
 
 _cache: dict[str, tuple[float, object]] = {}
 
@@ -109,53 +109,71 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
 
     print(f"[meta] total ad rows fetched: {len(raw_rows)}", flush=True)
 
-    # Batch-fetch creative ID + thumbnail + created_time directly from ad objects.
-    # Using creative{id,thumbnail_url} avoids a separate adcreative API call
-    # (which requires elevated token permissions not always available in production).
-    ad_to_creative: dict[str, str] = {}   # ad_id → creative_id
-    ad_created_times: dict[str, str] = {} # ad_id → created_time
-    thumbnails: dict[str, str] = {}       # creative_id → thumbnail url
-    CHUNK = 50
-    all_ad_ids = list({row["ad_id"] for row in raw_rows if row.get("ad_id")})
+    # Fetch creative IDs per ad, then batch-fetch 1080px thumbnails
+    thumbnails: dict[str, str] = {}
     try:
-        for i in range(0, len(all_ad_ids), CHUNK):
-            chunk = all_ad_ids[i : i + CHUNK]
+        ad_params = _base_params()
+        ad_params.update({"fields": "id,created_time,creative{id}", "limit": "500"})
+        ads_url = f"{BASE_URL}/act_{account_id}/ads"
+        creative_to_ad_ids: dict[str, list[str]] = {}
+        ad_created_times: dict[str, str] = {}
+
+        while ads_url:
+            r = await client.get(ads_url, params=ad_params)
+            if r.status_code != 200:
+                print(f"[meta] ads fetch failed {r.status_code}: {r.text[:200]}", flush=True)
+                break
+            body = r.json()
+            for ad in body.get("data", []):
+                ad_id       = ad["id"]
+                creative    = ad.get("creative", {})
+                creative_id = creative.get("id")
+                if creative_id:
+                    creative_to_ad_ids.setdefault(creative_id, []).append(ad_id)
+                if ad.get("created_time"):
+                    ad_created_times[ad_id] = ad["created_time"]
+            ads_url   = body.get("paging", {}).get("next")
+            ad_params = {}
+
+        # Batch-fetch 1080px thumbnails in chunks of 50
+        creative_ids = list(creative_to_ad_ids.keys())
+        CHUNK = 50
+        for i in range(0, len(creative_ids), CHUNK):
+            chunk = creative_ids[i : i + CHUNK]
             batch = [
-                {"method": "GET", "relative_url": f"{aid}?fields=created_time,creative{{id,thumbnail_url,picture}}"}
-                for aid in chunk
+                {"method": "GET", "relative_url": f"{cid}?fields=thumbnail_url,picture&thumbnail_width=1080&thumbnail_height=1080"}
+                for cid in chunk
             ]
             batch_params = _base_params()
             batch_params["batch"] = json.dumps(batch)
             resp = await client.post(BASE_URL, data=batch_params)
-            print(f"[meta] ad batch {i//CHUNK+1} status={resp.status_code}", flush=True)
+            print(f"[meta] batch chunk {i//CHUNK+1} status={resp.status_code}", flush=True)
             if resp.status_code != 200:
+                print(f"[meta] batch error: {resp.text[:200]}", flush=True)
                 continue
             for j, item in enumerate(resp.json()):
                 if not item or item.get("code") != 200:
+                    print(f"[meta] batch item {i+j} failed code={item.get('code') if item else None}: {str(item)[:200]}", flush=True)
                     continue
                 try:
                     body = json.loads(item["body"])
-                    aid = chunk[j]
-                    creative = body.get("creative", {})
-                    cid = creative.get("id")
-                    if cid:
-                        ad_to_creative[aid] = cid
-                        raw_thumb = creative.get("thumbnail_url", "") or creative.get("picture", "")
-                        if raw_thumb and cid not in thumbnails:
-                            thumbnails[cid] = _extract_best_url(raw_thumb)
-                    if body.get("created_time"):
-                        ad_created_times[aid] = body["created_time"]
+                    raw_thumb = body.get("thumbnail_url", "") or body.get("picture", "")
+                    if raw_thumb:
+                        best = _extract_best_url(raw_thumb)
+                        cid  = chunk[j]
+                        for ad_id in creative_to_ad_ids.get(cid, []):
+                            thumbnails[ad_id] = best
                 except Exception:
                     pass
-        print(f"[meta] creative IDs resolved: {len(ad_to_creative)}, thumbnails: {len(thumbnails)}", flush=True)
-    except Exception as e:
-        print(f"[meta] ad batch error (non-fatal): {e}", flush=True)
 
-    # Deduplicate by creative_id — sum spend/impressions/clicks/revenue/orders
+        print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
+    except Exception as e:
+        print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
+
+    # Deduplicate by ad_id — sum spend/impressions/clicks/revenue/orders
     by_creative: dict[str, dict] = {}
     for row in raw_rows:
-        ad_id         = row.get("ad_id", "unknown")
-        creative_id   = ad_to_creative.get(ad_id, ad_id)
+        creative_id   = row.get("ad_id", "unknown")
         creative_name = row.get("ad_name", "Unknown Ad")
         thumbnail_url = thumbnails.get(creative_id, "")
 
@@ -170,7 +188,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 "creative_id":    creative_id,
                 "creative_name":  creative_name,
                 "thumbnail_url":  thumbnail_url,
-                "created_time":   ad_created_times.get(ad_id, ""),
+                "created_time":   ad_created_times.get(creative_id, ""),
                 "spend":          0.0,
                 "impressions":    0,
                 "clicks":         0,
