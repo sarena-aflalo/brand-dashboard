@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: brand-dashboard
+    env: python
+    buildCommand: pip install -r backend/requirements.txt && cd frontend && npm install && npm run build
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: KLAVIYO_API_KEY
+        sync: false
+      - key: SHOPMY_API_KEY
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_AD_ACCOUNT_ID
+        sync: false
