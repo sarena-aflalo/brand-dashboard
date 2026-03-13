@@ -12,14 +12,42 @@ then returns top 10 by revenue and bottom 10 (spend > 0, revenue = 0) by CTR.
 import os
 import time
 import json
+import asyncio
 import httpx
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 from datetime import datetime, timezone
 
 BASE_URL = "https://graph.facebook.com/v19.0"
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 1800  # 30 minutes
 
 _cache: dict[str, tuple[float, object]] = {}
+
+_DISK_CACHE_PATH = Path(__file__).parent / ".cache" / "meta_cache.json"
+
+
+def _disk_cache_load():
+    try:
+        if _DISK_CACHE_PATH.exists():
+            data = json.loads(_DISK_CACHE_PATH.read_text())
+            now = time.time()
+            for key, (ts, val) in data.items():
+                if now - ts < CACHE_TTL:
+                    _cache[key] = (ts, val)
+            print(f"[meta] loaded {len(_cache)} cache entries from disk", flush=True)
+    except Exception as e:
+        print(f"[meta] disk cache load failed (non-fatal): {e}", flush=True)
+
+
+def _disk_cache_save():
+    try:
+        _DISK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DISK_CACHE_PATH.write_text(json.dumps(_cache))
+    except Exception as e:
+        print(f"[meta] disk cache save failed (non-fatal): {e}", flush=True)
+
+
+_disk_cache_load()
 
 PURCHASE_ACTION_TYPES = {
     "offsite_conversion.fb_pixel_purchase",
@@ -30,12 +58,18 @@ PURCHASE_ACTION_TYPES = {
 def _extract_best_url(thumbnail_url: str) -> str:
     """
     - Video ads wrap the real image in a url= query param — decode it.
-    - Image ads: return as-is (stripping params breaks the signed CDN URL).
+    - Image ads: Meta bakes in a stp transform param (e.g. p64x64) — strip it for native resolution.
     """
     try:
-        params = parse_qs(urlparse(thumbnail_url).query, keep_blank_values=True)
+        parsed = urlparse(thumbnail_url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
         if "url" in params:
             return unquote(params["url"][0])
+        # Strip stp param so CDN serves native resolution instead of a thumbnail size
+        if "stp" in params:
+            del params["stp"]
+            new_query = urlencode({k: v[0] for k, v in params.items()})
+            return urlunparse(parsed._replace(query=new_query))
         return thumbnail_url
     except Exception:
         return thumbnail_url
@@ -50,6 +84,7 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, value):
     _cache[key] = (time.time(), value)
+    _disk_cache_save()
 
 
 def _base_params() -> dict:
@@ -118,7 +153,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
     try:
         ad_params = _base_params()
         ad_params.update({
-            "fields": "id,created_time,creative{id,thumbnail_url}",
+            "fields": "id,created_time,creative{id,thumbnail_url,image_url}",
             "thumbnail_width": "1080",
             "thumbnail_height": "1080",
             "limit": "500",
@@ -137,13 +172,65 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 creative_id = creative.get("id")
                 if creative_id:
                     creative_to_ad_ids.setdefault(creative_id, []).append(ad_id)
-                    raw_thumb = creative.get("thumbnail_url", "")
-                    if raw_thumb and creative_id not in thumbnails:
-                        thumbnails[creative_id] = _extract_best_url(raw_thumb)
+                    if creative_id not in thumbnails:
+                        # Prefer image_url (full-res, image ads) over thumbnail_url
+                        img_url = creative.get("image_url", "")
+                        raw_thumb = creative.get("thumbnail_url", "")
+                        if img_url:
+                            thumbnails[creative_id] = img_url
+                        elif raw_thumb:
+                            # For video ads, thumbnail_url wraps the real image in a url= param — decode it.
+                            # For image ads, strip stp param for native resolution.
+                            thumbnails[creative_id] = _extract_best_url(raw_thumb)
                 if ad.get("created_time"):
                     ad_created_times[ad_id] = ad["created_time"]
             ads_url   = body.get("paging", {}).get("next")
             ad_params = {}
+
+        # Batch-fetch image_url directly from AdCreative for all creatives.
+        # The nested creative{} field on the ads endpoint doesn't reliably return image_url,
+        # but the AdCreative endpoint does. Meta batch API handles up to 50 per call.
+        all_creative_ids = list(creative_to_ad_ids.keys())
+        base_token = _base_params()["access_token"]
+        for batch_start in range(0, len(all_creative_ids), 50):
+            batch_ids = all_creative_ids[batch_start:batch_start + 50]
+            batch_requests = [
+                {"method": "GET", "relative_url": f"{cid}?fields=image_url,thumbnail_url&thumbnail_width=1080&thumbnail_height=1080"}
+                for cid in batch_ids
+            ]
+            try:
+                batch_resp = await asyncio.wait_for(
+                    client.post(
+                        "https://graph.facebook.com",
+                        data={
+                            "access_token": base_token,
+                            "batch": json.dumps(batch_requests),
+                        },
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                print("[meta] creative batch timed out, skipping image upgrade", flush=True)
+                break
+            if batch_resp.status_code != 200:
+                print(f"[meta] creative batch failed {batch_resp.status_code}: {batch_resp.text[:200]}", flush=True)
+                break
+            for item in batch_resp.json():
+                if not item or item.get("code") != 200:
+                    continue
+                try:
+                    body = json.loads(item["body"])
+                    cid = str(body.get("id", ""))
+                    if not cid:
+                        continue
+                    # image_url = full-res original (image ads only)
+                    # thumbnail_url from the AdCreative endpoint with explicit size = proper resolution for all ad types
+                    img = body.get("image_url", "") or _extract_best_url(body.get("thumbnail_url", ""))
+                    if img:
+                        thumbnails[cid] = img
+                except Exception:
+                    pass
+        print(f"[meta] creative batch image fetch done for {len(all_creative_ids)} creatives", flush=True)
 
         # Map creative thumbnails back to ad IDs
         for cid, ad_ids in creative_to_ad_ids.items():
@@ -151,7 +238,7 @@ async def _fetch_all_creatives(client: httpx.AsyncClient) -> list[dict]:
                 for ad_id in ad_ids:
                     thumbnails[ad_id] = thumbnails[cid]
 
-        print(f"[meta] images resolved: {len([v for k,v in thumbnails.items() if not k.isdigit() or True])}", flush=True)
+        print(f"[meta] images resolved: {len(thumbnails)}", flush=True)
     except Exception as e:
         print(f"[meta] image fetch error (non-fatal): {e}", flush=True)
 

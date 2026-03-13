@@ -77,15 +77,25 @@ async def _warmup():
     """Pre-fetch all data on startup so the first real request is fast."""
     try:
         async with _http_client() as client:
+            # Non-Klaviyo fetches can run immediately in parallel
             await asyncio.gather(
-                klaviyo.get_campaign_performance(client),
-                klaviyo.get_flow_performance(client),
-                klaviyo.get_subscriber_growth(client),
-                klaviyo.get_weekly_email_revenue(client),
                 shopmy.get_creator_performance(client),
                 meta.get_creative_performance(client),
                 return_exceptions=True,
             )
+            # Klaviyo warmup disabled temporarily — re-enable once rate limits clear
+            # klaviyo_fetches = [
+            #     klaviyo.get_campaign_performance,
+            #     klaviyo.get_flow_performance,
+            #     klaviyo.get_subscriber_growth,
+            #     klaviyo.get_weekly_email_revenue,
+            # ]
+            # for fetch in klaviyo_fetches:
+            #     try:
+            #         await fetch(client)
+            #         await asyncio.sleep(3)
+            #     except Exception as e:
+            #         print(f"[warmup] {fetch.__name__} failed (non-fatal): {e}", flush=True)
         print("[warmup] all data pre-fetched", flush=True)
     except Exception as e:
         print(f"[warmup] error (non-fatal): {e}", flush=True)

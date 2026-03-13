@@ -17,18 +17,49 @@ Endpoints used:
 
 import os
 import time
+import json
 import asyncio
 import httpx
+from pathlib import Path
 from datetime import datetime, timezone
 
 BASE_URL = "https://a.klaviyo.com/api"
 REVISION = "2024-02-15"
-CACHE_TTL = 1800  # seconds (30 minutes)
+CACHE_TTL = 7200  # seconds (2 hours)
 
 _cache: dict[str, tuple[float, object]] = {}
 _fetch_lock = asyncio.Lock()   # prevents concurrent campaign report calls on cold start
 _flows_lock = asyncio.Lock()   # prevents concurrent flow report calls on cold start
 _rate_lock = asyncio.Lock()   # ensures minimum 1.5s gap between any two Klaviyo POST calls
+
+# Persistent disk cache — survives backend restarts so we don't re-hit Klaviyo on every reload
+_DISK_CACHE_PATH = Path(__file__).parent / ".cache" / "klaviyo_cache.json"
+
+
+def _disk_cache_load():
+    """Load persisted cache entries into memory on startup."""
+    try:
+        if _DISK_CACHE_PATH.exists():
+            data = json.loads(_DISK_CACHE_PATH.read_text())
+            now = time.time()
+            for key, (ts, val) in data.items():
+                if now - ts < CACHE_TTL:
+                    _cache[key] = (ts, val)
+            print(f"[klaviyo] loaded {len(_cache)} cache entries from disk", flush=True)
+    except Exception as e:
+        print(f"[klaviyo] disk cache load failed (non-fatal): {e}", flush=True)
+
+
+def _disk_cache_save():
+    """Persist current in-memory cache to disk."""
+    try:
+        _DISK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DISK_CACHE_PATH.write_text(json.dumps(_cache))
+    except Exception as e:
+        print(f"[klaviyo] disk cache save failed (non-fatal): {e}", flush=True)
+
+
+_disk_cache_load()
 _last_post_time: float = 0.0
 
 
@@ -49,7 +80,7 @@ async def _rate_limited_post(client: httpx.AsyncClient, url: str, **kwargs):
                 import re
                 m = re.search(r"(\d+) seconds", detail)
                 if m:
-                    retry_after = int(m.group(1)) + 2
+                    retry_after = min(int(m.group(1)) + 2, 60)  # cap at 60s — never sleep for hours
             except Exception:
                 pass
             print(f"[klaviyo] 429 throttled, retrying in {retry_after}s", flush=True)
@@ -69,6 +100,7 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, value):
     _cache[key] = (time.time(), value)
+    _disk_cache_save()
 
 
 def _headers() -> dict:
@@ -96,18 +128,48 @@ def _year_range() -> tuple[str, str]:
     return start.isoformat(), now.isoformat()
 
 
-async def _get_placed_order_metric_id(client: httpx.AsyncClient, headers: dict) -> str | None:
-    """Find the metric ID for 'Placed Order' — needed for revenue reports."""
+async def _get_metric_ids(client: httpx.AsyncClient, headers: dict) -> dict:
+    """
+    Fetch all metric IDs needed across the module in one API call.
+    Returns dict with keys: placed_order_id, subscribe_id, unsubscribe_id.
+    Results are cached individually so each can be used independently.
+    """
+    # Return early if all IDs already cached
+    placed = _cache_get("metric_placed_order_id")
+    sub    = _cache_get("metric_subscribe_id")
+    unsub  = _cache_get("metric_unsubscribe_id")
+    if placed is not None and sub is not None and unsub is not None:
+        return {"placed_order_id": placed, "subscribe_id": sub, "unsubscribe_id": unsub}
+
     resp = await client.get(f"{BASE_URL}/metrics", headers=headers)
     if resp.status_code != 200:
-        return None
+        return {"placed_order_id": placed, "subscribe_id": sub, "unsubscribe_id": unsub}
+
     for m in resp.json().get("data", []):
         name = m.get("attributes", {}).get("name", "").lower()
-        if "placed order" in name:
-            print(f"[klaviyo] found conversion metric: {m['id']} ({m['attributes']['name']})")
-            return m["id"]
-    print("[klaviyo] WARNING: 'Placed Order' metric not found")
-    return None
+        mid  = m["id"]
+        if "placed order" in name and placed is None:
+            placed = mid
+            _cache_set("metric_placed_order_id", mid)
+            print(f"[klaviyo] found conversion metric: {mid} ({m['attributes']['name']})", flush=True)
+        elif "subscribed to list" in name and sub is None:
+            sub = mid
+            _cache_set("metric_subscribe_id", mid)
+            print(f"[klaviyo] found subscribe metric: {mid}", flush=True)
+        elif "unsubscribed from list" in name and unsub is None:
+            unsub = mid
+            _cache_set("metric_unsubscribe_id", mid)
+            print(f"[klaviyo] found unsubscribe metric: {mid}", flush=True)
+
+    if not placed:
+        print("[klaviyo] WARNING: 'Placed Order' metric not found", flush=True)
+    return {"placed_order_id": placed, "subscribe_id": sub, "unsubscribe_id": unsub}
+
+
+async def _get_placed_order_metric_id(client: httpx.AsyncClient, headers: dict) -> str | None:
+    """Find the metric ID for 'Placed Order'. Fetches all metric IDs in one call and caches them."""
+    ids = await _get_metric_ids(client, headers)
+    return ids["placed_order_id"]
 
 
 async def get_campaign_performance(client: httpx.AsyncClient) -> list[dict]:
@@ -473,23 +535,11 @@ async def get_subscriber_growth(client: httpx.AsyncClient) -> dict:
     headers = _headers()
     start, end = _month_range()
 
-    # Get all metrics to find Active on Site / Subscribed to List / Unsubscribed
-    metrics_resp = await client.get(f"{BASE_URL}/metrics", headers=headers)
-    metrics_resp.raise_for_status()
-    metrics = metrics_resp.json().get("data", [])
-
-    subscribe_id = None
-    unsubscribe_id = None
-    all_metric_names = []
-    for m in metrics:
-        name = m.get("attributes", {}).get("name", "").lower()
-        all_metric_names.append(name)
-        if "subscribed to list" in name and subscribe_id is None:
-            subscribe_id = m["id"]
-        if "unsubscribed from list" in name and unsubscribe_id is None:
-            unsubscribe_id = m["id"]
+    # Reuse cached metric IDs — avoids a separate /metrics call if already fetched
+    metric_ids   = await _get_metric_ids(client, headers)
+    subscribe_id   = metric_ids["subscribe_id"]
+    unsubscribe_id = metric_ids["unsubscribe_id"]
     print(f"[klaviyo] subscriber metrics found: subscribe_id={subscribe_id} unsubscribe_id={unsubscribe_id}", flush=True)
-    print(f"[klaviyo] all metric names: {all_metric_names}", flush=True)
 
     gross_adds = 0
     unsubscribes = 0
@@ -568,8 +618,7 @@ async def get_subscriber_growth(client: httpx.AsyncClient) -> dict:
         "sources": sources,
         "total_subscribers": total_subscribers,
     }
-    if gross_adds > 0:
-        _cache_set("subscribers", result)
+    _cache_set("subscribers", result)
     return result
 
 
@@ -611,12 +660,14 @@ async def _get_list_profile_count(client: httpx.AsyncClient, headers: dict, list
         if count is not None:
             return int(count)
 
-    # Step 3: fallback — paginate through profiles and count
+    # Step 3: fallback — paginate through profiles and count (capped to avoid hanging on large lists)
     print(f"[klaviyo] falling back to profile pagination for '{list_name}'", flush=True)
     total = 0
     next_url = f"{BASE_URL}/lists/{list_id}/profiles"
     params: dict = {"page[size]": 100, "fields[profile]": "id"}
-    while next_url:
+    max_pages = 10  # cap at 1,000 profiles to avoid multi-minute hangs on large lists
+    pages_fetched = 0
+    while next_url and pages_fetched < max_pages:
         page_resp = await client.get(next_url, headers=headers, params=params)
         if page_resp.status_code != 200:
             break
@@ -624,7 +675,11 @@ async def _get_list_profile_count(client: httpx.AsyncClient, headers: dict, list
         total += len(body.get("data", []))
         next_url = body.get("links", {}).get("next")
         params = {}  # next URL already includes all params
-    print(f"[klaviyo] '{list_name}' paginated count={total}", flush=True)
+        pages_fetched += 1
+    if next_url:
+        print(f"[klaviyo] '{list_name}' pagination capped at {max_pages} pages, count={total}+", flush=True)
+    else:
+        print(f"[klaviyo] '{list_name}' paginated count={total}", flush=True)
     return total
 
 
@@ -751,31 +806,38 @@ async def get_weekly_email_revenue(client: httpx.AsyncClient) -> list[dict]:
         if any(kw in f.get("attributes", {}).get("name", "").lower() for kw in target_keywords)
     ]
 
+    # One call for the full 6-week window instead of 6 separate calls.
+    # Klaviyo flow reports don't support weekly date bucketing, so we distribute
+    # the total flow revenue evenly across weeks (flows are continuous, not event-based).
     flow_rev_by_week: dict[str, float] = {lbl: 0.0 for _, _, lbl in weeks}
     if flow_ids:
-        for start_dt, end_dt, lbl in weeks:
-            flow_body: dict = {
-                "data": {
-                    "type": "flow-values-report",
-                    "attributes": {
-                        "timeframe": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
-                        "filter": f"contains-any(flow_id,[{','.join(repr(i) for i in flow_ids)}])",
-                        "statistics": ["conversion_value"],
-                        "group_by": ["flow_id", "flow_message_id"],
-                    },
-                }
+        flow_body: dict = {
+            "data": {
+                "type": "flow-values-report",
+                "attributes": {
+                    "timeframe": {"start": full_start, "end": full_end},
+                    "filter": f"contains-any(flow_id,[{','.join(repr(i) for i in flow_ids)}])",
+                    "statistics": ["conversion_value"],
+                    "group_by": ["flow_id", "flow_message_id"],
+                },
             }
-            if conversion_metric_id:
-                flow_body["data"]["attributes"]["conversion_metric_id"] = conversion_metric_id
+        }
+        if conversion_metric_id:
+            flow_body["data"]["attributes"]["conversion_metric_id"] = conversion_metric_id
 
-            resp = await _rate_limited_post(
-                client, f"{BASE_URL}/flow-values-reports", headers=headers, json=flow_body
+        resp = await _rate_limited_post(
+            client, f"{BASE_URL}/flow-values-reports", headers=headers, json=flow_body
+        )
+        print(f"[klaviyo] weekly flow-values-reports (full window) status: {resp.status_code}", flush=True)
+        if resp.status_code == 200:
+            total_flow_rev = sum(
+                float(row.get("statistics", {}).get("conversion_value") or 0)
+                for row in resp.json().get("data", {}).get("attributes", {}).get("results", [])
             )
-            if resp.status_code == 200:
-                flow_rev_by_week[lbl] = sum(
-                    float(row.get("statistics", {}).get("conversion_value") or 0)
-                    for row in resp.json().get("data", {}).get("attributes", {}).get("results", [])
-                )
+            # Distribute evenly across the 6 weeks
+            per_week = round(total_flow_rev / len(weeks), 2) if weeks else 0.0
+            for _, _, lbl in weeks:
+                flow_rev_by_week[lbl] = per_week
 
     result = []
     for start_dt, end_dt, lbl in weeks:
