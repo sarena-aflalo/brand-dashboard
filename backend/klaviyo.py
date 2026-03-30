@@ -205,7 +205,7 @@ async def _fetch_campaign_performance(client: httpx.AsyncClient) -> dict:
                 f"less-or-equal(scheduled_at,{end}))"
             ),
             "include": "campaign-messages",
-            "fields[campaign]": "name,scheduled_at,status",
+            "fields[campaign]": "name,scheduled_at,send_time,status",
             "fields[campaign-message]": "label,content",
         },
     )
@@ -252,6 +252,10 @@ async def _fetch_campaign_performance(client: httpx.AsyncClient) -> dict:
                 "statistics": [
                     "recipients",
                     "conversion_value",
+                    "open_rate",
+                    "click_rate",
+                    "conversion_rate",
+                    "unsubscribe_rate",
                 ],
             },
         }
@@ -282,8 +286,24 @@ async def _fetch_campaign_performance(client: httpx.AsyncClient) -> dict:
             if cid in stats_by_id:
                 stats_by_id[cid]["recipients"] = (stats_by_id[cid].get("recipients") or 0) + (s.get("recipients") or 0)
                 stats_by_id[cid]["conversion_value"] = (stats_by_id[cid].get("conversion_value") or 0) + (s.get("conversion_value") or 0)
+                # For rates, keep the value from the first row (they shouldn't differ across message splits)
+                if "open_rate" not in stats_by_id[cid]:
+                    stats_by_id[cid]["open_rate"] = s.get("open_rate")
+                if "click_rate" not in stats_by_id[cid]:
+                    stats_by_id[cid]["click_rate"] = s.get("click_rate")
+                if "conversion_rate" not in stats_by_id[cid]:
+                    stats_by_id[cid]["conversion_rate"] = s.get("conversion_rate")
+                if "unsubscribe_rate" not in stats_by_id[cid]:
+                    stats_by_id[cid]["unsubscribe_rate"] = s.get("unsubscribe_rate")
             else:
-                stats_by_id[cid] = {"recipients": s.get("recipients") or 0, "conversion_value": s.get("conversion_value") or 0}
+                stats_by_id[cid] = {
+                    "recipients": s.get("recipients") or 0,
+                    "conversion_value": s.get("conversion_value") or 0,
+                    "open_rate": s.get("open_rate"),
+                    "click_rate": s.get("click_rate"),
+                    "conversion_rate": s.get("conversion_rate"),
+                    "unsubscribe_rate": s.get("unsubscribe_rate"),
+                }
     else:
         print(f"[klaviyo] report failed {report_resp.status_code}: {report_resp.text}", flush=True)
 
@@ -300,10 +320,14 @@ async def _fetch_campaign_performance(client: httpx.AsyncClient) -> dict:
                 "id": cid,
                 "subject": subject_by_campaign.get(cid, ""),
                 "preview_text": preview_by_campaign.get(cid, ""),
-                "send_date": attrs.get("scheduled_at", ""),
+                "send_date": attrs.get("send_time") or attrs.get("scheduled_at", ""),
                 "revenue": revenue,
                 "sends": sends,
                 "per_send": per_send,
+                "open_rate": stats.get("open_rate"),
+                "ctr": stats.get("click_rate"),
+                "cvr": stats.get("conversion_rate"),
+                "unsubscribe_rate": stats.get("unsubscribe_rate"),
             }
         )
 
@@ -350,7 +374,7 @@ async def _get_ytd_averages(client: httpx.AsyncClient, headers: dict, conversion
             "type": "campaign-values-report",
             "attributes": {
                 "timeframe": {"start": ytd_start, "end": ytd_end},
-                "statistics": ["recipients", "conversion_value"],
+                "statistics": ["recipients", "conversion_value", "open_rate", "click_rate", "conversion_rate", "unsubscribe_rate"],
             },
         }
     }
@@ -370,7 +394,12 @@ async def _get_ytd_averages(client: httpx.AsyncClient, headers: dict, conversion
 
     total_revenue = 0.0
     total_sends = 0
+    total_open_rate = 0.0
+    total_click_rate = 0.0
+    total_conversion_rate = 0.0
     campaign_ids_seen: set = set()
+    # Track per-campaign rates to average correctly (one rate per campaign, not per message)
+    campaign_rates: dict[str, dict] = {}
 
     if resp.status_code == 200:
         rows = resp.json().get("data", {}).get("attributes", {}).get("results", [])
@@ -381,6 +410,13 @@ async def _get_ytd_averages(client: httpx.AsyncClient, headers: dict, conversion
             campaign_ids_seen.add(cid)
             total_revenue += float(s.get("conversion_value") or 0)
             total_sends += int(s.get("recipients") or 0)
+            if cid not in campaign_rates:
+                campaign_rates[cid] = {
+                    "open_rate": s.get("open_rate"),
+                    "click_rate": s.get("click_rate"),
+                    "unsubscribe_rate": s.get("unsubscribe_rate"),
+                    "conversion_rate": s.get("conversion_rate"),
+                }
         print(f"[klaviyo] ytd totals: campaigns={len(campaign_ids_seen)} revenue={total_revenue} sends={total_sends}", flush=True)
 
     count = len(campaign_ids_seen)
@@ -388,15 +424,108 @@ async def _get_ytd_averages(client: httpx.AsyncClient, headers: dict, conversion
     avg_sends = round(total_sends / count) if count else 0
     avg_per_send = round(total_revenue / total_sends, 4) if total_sends else 0.0
 
+    open_rates = [v["open_rate"] for v in campaign_rates.values() if v["open_rate"] is not None]
+    click_rates = [v["click_rate"] for v in campaign_rates.values() if v["click_rate"] is not None]
+    conv_rates = [v["conversion_rate"] for v in campaign_rates.values() if v["conversion_rate"] is not None]
+    unsub_rates = [v["unsubscribe_rate"] for v in campaign_rates.values() if v.get("unsubscribe_rate") is not None]
+    avg_open_rate = round(sum(open_rates) / len(open_rates), 6) if open_rates else None
+    avg_click_rate = round(sum(click_rates) / len(click_rates), 6) if click_rates else None
+    avg_conversion_rate = round(sum(conv_rates) / len(conv_rates), 6) if conv_rates else None
+    avg_unsub_rate = round(sum(unsub_rates) / len(unsub_rates), 6) if unsub_rates else None
+
     result = {
         "campaign_count": count,
         "avg_revenue": avg_revenue,
         "avg_sends": avg_sends,
         "avg_per_send": avg_per_send,
+        "avg_open_rate": avg_open_rate,
+        "avg_ctr": avg_click_rate,
+        "avg_cvr": avg_conversion_rate,
+        "avg_unsub_rate": avg_unsub_rate,
     }
     if count:
         _cache_set("ytd", result)
     return result
+
+
+async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
+    """
+    Return all LTD campaigns with send_date and click_rate for send-time heatmap.
+    Shape: [{send_date, ctr}]
+    """
+    cached = _cache_get("send_time_analysis")
+    if cached is not None:
+        return cached
+
+    headers = _headers()
+    now = datetime.now(timezone.utc)
+    ltd_start = "2020-01-01T00:00:00Z"
+    year_end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ytd_start = ltd_start
+    ytd_end = year_end
+    campaigns_resp = await client.get(
+        f"{BASE_URL}/campaigns",
+        headers=headers,
+        params={
+            "filter": (
+                f"and(equals(messages.channel,'email'),"
+                f"equals(status,'Sent'),"
+                f"greater-or-equal(scheduled_at,{ltd_start}),"
+                f"less-or-equal(scheduled_at,{year_end}))"
+            ),
+            "fields[campaign]": "name,scheduled_at,send_time,status",
+        },
+    )
+    campaigns_resp.raise_for_status()
+    campaign_list = campaigns_resp.json().get("data", [])
+
+    if not campaign_list:
+        return []
+
+    # Fetch click_rate for all campaigns via campaign-values-reports
+    conversion_metric_id = await _get_placed_order_metric_id(client, headers)
+    report_body: dict = {
+        "data": {
+            "type": "campaign-values-report",
+            "attributes": {
+                "timeframe": {"start": ytd_start, "end": ytd_end},
+                "statistics": ["click_rate"],
+            },
+        }
+    }
+    if conversion_metric_id:
+        report_body["data"]["attributes"]["conversion_metric_id"] = conversion_metric_id
+
+    report_resp = await _rate_limited_post(
+        client,
+        f"{BASE_URL}/campaign-values-reports",
+        headers=headers,
+        json=report_body,
+    )
+
+    ctr_by_id: dict[str, float] = {}
+    if report_resp.status_code == 200:
+        rows = report_resp.json().get("data", {}).get("attributes", {}).get("results", [])
+        for row in rows:
+            cid = row.get("groupings", {}).get("campaign_id", "")
+            cr = row.get("statistics", {}).get("click_rate")
+            if cid and cr is not None and cid not in ctr_by_id:
+                ctr_by_id[cid] = float(cr)
+    else:
+        print(f"[klaviyo] send_time report failed {report_resp.status_code}", flush=True)
+
+    results = []
+    for c in campaign_list:
+        cid = c["id"]
+        attrs = c.get("attributes", {})
+        send_date = attrs.get("send_time") or attrs.get("scheduled_at", "")
+        ctr = ctr_by_id.get(cid)
+        if send_date and ctr is not None:
+            results.append({"send_date": send_date, "ctr": ctr})
+
+    if results:
+        _cache_set("send_time_analysis", results)
+    return results
 
 
 FLOW_NAMES = {

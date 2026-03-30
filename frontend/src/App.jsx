@@ -1,16 +1,11 @@
 import { useState } from 'react'
 import Header from './components/Header'
-import KPIStrip from './components/KPIStrip'
 import EmailTab from './components/EmailTab'
 import InfluencerTab from './components/InfluencerTab'
-import PaidTab from './components/PaidTab'
-import LaunchTab from './components/LaunchTab'
 
 const TABS = [
   { id: 'email', label: 'Email' },
   { id: 'influencer', label: 'Influencer' },
-  { id: 'paid', label: 'Creative' },
-  { id: 'launch', label: 'Launch Performance' },
 ]
 
 export default function App() {
@@ -18,10 +13,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F4F5F7]">
-      {/* Sticky top section: header + KPI strip + tabs */}
+      {/* Sticky top section: header + tabs */}
       <div className="sticky top-0 z-10 shadow-sm">
         <Header />
-        <KPIStrip />
 
         {/* Tab bar */}
         <div className="bg-white border-b border-gray-200 px-6">
@@ -49,8 +43,6 @@ export default function App() {
       <main className="px-6 py-5 max-w-7xl mx-auto">
         {activeTab === 'email' && <EmailTab />}
         {activeTab === 'influencer' && <InfluencerTab />}
-        {activeTab === 'paid' && <PaidTab />}
-        {activeTab === 'launch' && <LaunchTab />}
       </main>
     </div>
   )

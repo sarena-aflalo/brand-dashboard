@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import SendTimeHeatmap from './SendTimeHeatmap'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -10,9 +11,15 @@ function fmt(n, digits = 0) {
 function fmtDate(iso) {
   if (!iso) return '—'
   const d = new Date(iso)
-  const day = d.toLocaleDateString('en-US', { weekday: 'short' })
-  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const day = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' })
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })
   return `${day}, ${date}`
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' })
 }
 
 function useApi(url) {
@@ -178,35 +185,44 @@ function CampaignTable() {
             <thead>
               <tr className="text-xs font-medium text-gray-400 uppercase tracking-wide border-b border-gray-100">
                 <th className="text-left pb-2 pr-4">Date</th>
+                <th className="text-left pb-2 pr-4">Time Sent</th>
                 <th className="text-left pb-2 pr-4">Subject</th>
                 <th className="text-left pb-2 pr-4">Preview text</th>
                 <th className="text-right pb-2 pr-4">Klaviyo Revenue</th>
-                <th className="text-right pb-2 pr-4">Sends</th>
                 <th className="text-right pb-2 pr-4">$ / Send</th>
-                <th className="text-left pb-2"></th>
+                <th className="text-right pb-2 pr-4">Open Rate</th>
+                <th className="text-right pb-2 pr-4">CTR</th>
+                <th className="text-right pb-2 pr-4">CVR</th>
+                <th className="text-right pb-2">Unsub Rate</th>
               </tr>
             </thead>
             <tbody>
               {campaigns.map((c) => (
                 <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                   <td className="py-2.5 pr-4 text-gray-500 whitespace-nowrap">{fmtDate(c.send_date)}</td>
+                  <td className="py-2.5 pr-4 text-gray-500 whitespace-nowrap">{fmtTime(c.send_date)}</td>
                   <td className="py-2.5 pr-4 font-medium text-gray-800 max-w-[200px] truncate">{c.subject || '—'}</td>
                   <td className="py-2.5 pr-4 text-gray-500 max-w-[220px] truncate">{c.preview_text || '—'}</td>
                   <td className="py-2.5 pr-4 text-right font-medium text-gray-800">{fmt(c.revenue)}</td>
-                  <td className="py-2.5 pr-4 text-right text-gray-500">{c.sends.toLocaleString()}</td>
                   <td className="py-2.5 pr-4 text-right text-gray-800">{fmt(c.per_send, 2)}</td>
-                  <td className="py-2.5"><Badge type={c.badge} /></td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{c.open_rate != null ? (c.open_rate * 100).toFixed(1) + '%' : '—'}</td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{c.ctr != null ? (c.ctr * 100).toFixed(2) + '%' : '—'}</td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{c.cvr != null ? (c.cvr * 100).toFixed(2) + '%' : '—'}</td>
+                  <td className="py-2.5 text-right text-gray-500">{c.unsubscribe_rate != null ? (c.unsubscribe_rate * 100).toFixed(2) + '%' : '—'}</td>
                 </tr>
               ))}
               {ytd && (
                 <tr className="bg-gray-50 border-t-2 border-gray-200">
                   <td className="py-2.5 pr-4 text-xs font-medium text-gray-400 uppercase tracking-wide whitespace-nowrap">2026 Average</td>
+                  <td className="py-2.5 pr-4"></td>
                   <td className="py-2.5 pr-4 text-xs text-gray-400">{ytd.campaign_count} campaigns</td>
                   <td className="py-2.5 pr-4"></td>
                   <td className="py-2.5 pr-4 text-right font-medium text-gray-600">{fmt(ytd.avg_revenue)}</td>
-                  <td className="py-2.5 pr-4 text-right text-gray-500">{(ytd.avg_sends ?? 0).toLocaleString()}</td>
                   <td className="py-2.5 pr-4 text-right text-gray-600">{fmt(ytd.avg_per_send, 2)}</td>
-                  <td className="py-2.5"></td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{ytd.avg_open_rate != null ? (ytd.avg_open_rate * 100).toFixed(1) + '%' : '—'}</td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{ytd.avg_ctr != null ? (ytd.avg_ctr * 100).toFixed(2) + '%' : '—'}</td>
+                  <td className="py-2.5 pr-4 text-right text-gray-500">{ytd.avg_cvr != null ? (ytd.avg_cvr * 100).toFixed(2) + '%' : '—'}</td>
+                  <td className="py-2.5 text-right text-gray-500">{ytd.avg_unsub_rate != null ? (ytd.avg_unsub_rate * 100).toFixed(2) + '%' : '—'}</td>
                 </tr>
               )}
             </tbody>
@@ -284,6 +300,7 @@ export default function EmailTab() {
     <div className="space-y-5">
       <SubscriberCard />
       <CampaignTable />
+      <SendTimeHeatmap />
       <AlwaysOnFlows />
     </div>
   )

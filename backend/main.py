@@ -197,6 +197,18 @@ async def email_weekly_revenue():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/email/send-time-analysis")
+async def email_send_time_analysis():
+    try:
+        async with _http_client() as client:
+            data = await klaviyo.get_send_time_analysis(client)
+        return {"status": "ok", "data": data}
+    except Exception as e:
+        import traceback
+        print(f"[send-time-analysis] ERROR: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/email/subscribers")
 async def email_subscribers():
     try:
