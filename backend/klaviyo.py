@@ -21,7 +21,7 @@ import json
 import asyncio
 import httpx
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 BASE_URL = "https://a.klaviyo.com/api"
 REVISION = "2024-02-15"
@@ -459,10 +459,9 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
 
     headers = _headers()
     now = datetime.now(timezone.utc)
-    ltd_start = "2020-01-01T00:00:00Z"
+    one_year_ago = (now - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+    ltd_start = one_year_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
     year_end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    ytd_start = ltd_start
-    ytd_end = year_end
     campaigns_resp = await client.get(
         f"{BASE_URL}/campaigns",
         headers=headers,
@@ -473,11 +472,12 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
                 f"greater-or-equal(scheduled_at,{ltd_start}),"
                 f"less-or-equal(scheduled_at,{year_end}))"
             ),
-            "fields[campaign]": "name,scheduled_at,send_time,status",
+            "fields[campaign]": "name,scheduled_at,status",
         },
     )
     campaigns_resp.raise_for_status()
     campaign_list = campaigns_resp.json().get("data", [])
+    print(f"[klaviyo] send_time campaigns: {len(campaign_list)}", flush=True)
 
     if not campaign_list:
         return []
@@ -488,7 +488,7 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
         "data": {
             "type": "campaign-values-report",
             "attributes": {
-                "timeframe": {"start": ytd_start, "end": ytd_end},
+                "timeframe": {"start": ltd_start, "end": year_end},
                 "statistics": ["click_rate"],
             },
         }
@@ -506,13 +506,14 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
     ctr_by_id: dict[str, float] = {}
     if report_resp.status_code == 200:
         rows = report_resp.json().get("data", {}).get("attributes", {}).get("results", [])
+        print(f"[klaviyo] send_time report rows: {len(rows)}", flush=True)
         for row in rows:
             cid = row.get("groupings", {}).get("campaign_id", "")
             cr = row.get("statistics", {}).get("click_rate")
             if cid and cr is not None and cid not in ctr_by_id:
                 ctr_by_id[cid] = float(cr)
     else:
-        print(f"[klaviyo] send_time report failed {report_resp.status_code}", flush=True)
+        print(f"[klaviyo] send_time report failed {report_resp.status_code}: {report_resp.text[:500]}", flush=True)
 
     results = []
     for c in campaign_list:
@@ -522,10 +523,41 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
         ctr = ctr_by_id.get(cid)
         if send_date and ctr is not None:
             results.append({"send_date": send_date, "ctr": ctr})
+    print(f"[klaviyo] send_time results: {len(results)} (ctr_by_id had {len(ctr_by_id)} entries)", flush=True)
 
     if results:
         _cache_set("send_time_analysis", results)
     return results
+
+
+async def get_campaign_preview_html(client: httpx.AsyncClient, campaign_id: str) -> str | None:
+    """Fetch the rendered HTML for a campaign's first message. Cached per campaign."""
+    cache_key = f"preview_{campaign_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    headers = _headers()
+    # Get the campaign messages for this campaign
+    resp = await client.get(
+        f"{BASE_URL}/campaign-messages",
+        headers=headers,
+        params={
+            "filter": f"equals(campaign.id,\"{campaign_id}\")",
+            "fields[campaign-message]": "content",
+        },
+    )
+    if resp.status_code != 200:
+        return None
+
+    messages = resp.json().get("data", [])
+    if not messages:
+        return None
+
+    html = messages[0].get("attributes", {}).get("content", {}).get("html", "")
+    if html:
+        _cache_set(cache_key, html)
+    return html or None
 
 
 FLOW_NAMES = {
