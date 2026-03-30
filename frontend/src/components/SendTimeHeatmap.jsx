@@ -1,27 +1,23 @@
 import { useEffect, useState } from 'react'
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const DAY_INDEX = { 0: 'Sun', 1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu', 5: 'Fri', 6: 'Sat' }
 
-const TIME_BUCKETS = [
-  { label: '6–9 AM',   start: 6,  end: 9  },
-  { label: '9–12 PM',  start: 9,  end: 12 },
-  { label: '12–3 PM',  start: 12, end: 15 },
-  { label: '3–6 PM',   start: 15, end: 18 },
-  { label: '6–9 PM',   start: 18, end: 21 },
-  { label: '9 PM+',    start: 21, end: 24 },
-]
+const TIME_BUCKETS = Array.from({ length: 10 }, (_, i) => {
+  const h = i + 9
+  const label = h < 12 ? `${h}AM` : h === 12 ? '12PM' : `${h - 12}PM`
+  return { label, start: h, end: h + 1 }
+})
 
 function getBucket(hour) {
   return TIME_BUCKETS.find((b) => hour >= b.start && hour < b.end)?.label ?? null
 }
 
 function buildGrid(campaigns) {
-  // grid[day][timeBucket] = [ctr values]
   const grid = {}
   for (const day of DAYS) {
     grid[day] = {}
     for (const b of TIME_BUCKETS) grid[day][b.label] = []
+    grid[day]['__all__'] = []
   }
 
   for (const { send_date, ctr } of campaigns) {
@@ -36,8 +32,9 @@ function buildGrid(campaigns) {
     const hourStr = etParts.find((p) => p.type === 'hour')?.value
     const etHour = hourStr === '24' ? 0 : parseInt(hourStr, 10)
     const bucket = getBucket(etHour)
-    if (dayName && bucket && grid[dayName]?.[bucket] !== undefined) {
-      grid[dayName][bucket].push(ctr)
+    if (dayName && grid[dayName]) {
+      grid[dayName]['__all__'].push(ctr)
+      if (bucket) grid[dayName][bucket].push(ctr)
     }
   }
   return grid
@@ -48,14 +45,14 @@ function avg(arr) {
   return arr.reduce((a, b) => a + b, 0) / arr.length
 }
 
-function cellColor(value, min, max) {
+function cellStyle(value, min, max) {
   if (value === null) return { bg: 'bg-gray-50', text: 'text-gray-300' }
-  if (max === min) return { bg: 'bg-blue-100', text: 'text-blue-700' }
+  if (max === min) return { bg: 'bg-green-100', text: 'text-green-700' }
   const t = (value - min) / (max - min)
-  if (t >= 0.75) return { bg: 'bg-green-100', text: 'text-green-800' }
-  if (t >= 0.5)  return { bg: 'bg-green-50',  text: 'text-green-700' }
-  if (t >= 0.25) return { bg: 'bg-gray-100',  text: 'text-gray-600' }
-  return { bg: 'bg-red-50', text: 'text-red-500' }
+  if (t >= 0.75) return { bg: 'bg-green-500', text: 'text-white' }
+  if (t >= 0.5)  return { bg: 'bg-green-300', text: 'text-green-900' }
+  if (t >= 0.25) return { bg: 'bg-green-100', text: 'text-green-800' }
+  return { bg: 'bg-gray-50', text: 'text-gray-400' }
 }
 
 export default function SendTimeHeatmap() {
@@ -65,7 +62,7 @@ export default function SendTimeHeatmap() {
 
   useEffect(() => {
     fetch('/api/email/send-time-analysis')
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`) ; return r.json() })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
       .then((j) => setData(j.data ?? []))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -73,7 +70,6 @@ export default function SendTimeHeatmap() {
 
   const grid = data ? buildGrid(data) : null
 
-  // Compute min/max avg CTR across all cells for color scaling
   let minVal = Infinity, maxVal = -Infinity
   if (grid) {
     for (const day of DAYS) {
@@ -87,14 +83,14 @@ export default function SendTimeHeatmap() {
   return (
     <div className="bg-white rounded-lg p-5">
       <h3 className="text-sm font-semibold text-gray-700 mb-1">Best Send Times</h3>
-      <p className="text-xs text-gray-400 mb-4">Average CTR by day of week and time of day (LTD, ET)</p>
+      <p className="text-xs text-gray-400 mb-4">Avg CTR by day and hour (past 12 months, ET)</p>
 
       {loading && (
         <div className="animate-pulse space-y-2">
           {[1,2,3,4,5,6,7].map((i) => (
             <div key={i} className="flex gap-2">
               <div className="h-8 w-10 bg-gray-100 rounded" />
-              {[1,2,3,4,5,6].map((j) => <div key={j} className="h-8 flex-1 bg-gray-100 rounded" />)}
+              {[1,2,3,4,5,6,7,8,9,10,11].map((j) => <div key={j} className="h-8 flex-1 bg-gray-100 rounded" />)}
             </div>
           ))}
         </div>
@@ -111,9 +107,12 @@ export default function SendTimeHeatmap() {
           <table className="w-full text-xs">
             <thead>
               <tr>
-                <th className="text-left pb-2 pr-3 text-gray-400 font-medium w-10" />
+                <th className="text-left pb-2 pr-2 text-gray-400 font-medium w-10" />
+                <th className="pb-2 px-0.5 text-center text-gray-400 font-medium whitespace-nowrap text-[10px] border-r border-black">
+                  All
+                </th>
                 {TIME_BUCKETS.map((b) => (
-                  <th key={b.label} className="pb-2 px-1 text-center text-gray-400 font-medium whitespace-nowrap">
+                  <th key={b.label} className="pb-2 px-0.5 text-center text-gray-400 font-medium whitespace-nowrap text-[10px]">
                     {b.label}
                   </th>
                 ))}
@@ -122,18 +121,37 @@ export default function SendTimeHeatmap() {
             <tbody>
               {DAYS.map((day) => (
                 <tr key={day}>
-                  <td className="pr-3 py-1 text-gray-500 font-medium">{day}</td>
+                  <td className="pr-2 py-1 text-gray-500 font-medium">{day}</td>
+                  {/* Day summary column */}
+                  {(() => {
+                    const vals = grid[day]['__all__']
+                    const v = avg(vals)
+                    return (
+                      <td key="all" className="px-0.5 py-1 border-r border-black">
+                        <div className="rounded flex flex-col items-center justify-center h-10 bg-gray-50">
+                          {v !== null ? (
+                            <>
+                              <span className="font-semibold text-gray-700">{(v * 100).toFixed(2)}%</span>
+                              <span className="text-gray-300 text-[10px]">{vals.length}x</span>
+                            </>
+                          ) : (
+                            <span className="text-gray-200">—</span>
+                          )}
+                        </div>
+                      </td>
+                    )
+                  })()}
                   {TIME_BUCKETS.map((b) => {
                     const vals = grid[day][b.label]
                     const v = avg(vals)
-                    const { bg, text } = cellColor(v, minVal, maxVal)
+                    const { bg, text } = cellStyle(v, minVal, maxVal)
                     return (
-                      <td key={b.label} className="px-1 py-1">
+                      <td key={b.label} className="px-0.5 py-1">
                         <div className={`rounded flex flex-col items-center justify-center h-10 ${bg}`}>
                           {v !== null ? (
                             <>
                               <span className={`font-semibold ${text}`}>{(v * 100).toFixed(2)}%</span>
-                              <span className="text-gray-300 text-[10px]">{vals.length} send{vals.length !== 1 ? 's' : ''}</span>
+                              <span className={`text-[10px] ${text} opacity-70`}>{vals.length}x</span>
                             </>
                           ) : (
                             <span className="text-gray-200">—</span>

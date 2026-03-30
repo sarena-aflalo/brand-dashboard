@@ -489,7 +489,7 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
             "type": "campaign-values-report",
             "attributes": {
                 "timeframe": {"start": ltd_start, "end": year_end},
-                "statistics": ["click_rate"],
+                "statistics": ["click_rate", "recipients"],
             },
         }
     }
@@ -503,15 +503,17 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
         json=report_body,
     )
 
-    ctr_by_id: dict[str, float] = {}
+    stats_by_id: dict[str, dict] = {}
     if report_resp.status_code == 200:
         rows = report_resp.json().get("data", {}).get("attributes", {}).get("results", [])
         print(f"[klaviyo] send_time report rows: {len(rows)}", flush=True)
         for row in rows:
             cid = row.get("groupings", {}).get("campaign_id", "")
-            cr = row.get("statistics", {}).get("click_rate")
-            if cid and cr is not None and cid not in ctr_by_id:
-                ctr_by_id[cid] = float(cr)
+            s = row.get("statistics", {})
+            cr = s.get("click_rate")
+            recipients = int(s.get("recipients") or 0)
+            if cid and cr is not None and cid not in stats_by_id:
+                stats_by_id[cid] = {"ctr": float(cr), "sends": recipients}
     else:
         print(f"[klaviyo] send_time report failed {report_resp.status_code}: {report_resp.text[:500]}", flush=True)
 
@@ -519,11 +521,11 @@ async def get_send_time_analysis(client: httpx.AsyncClient) -> list[dict]:
     for c in campaign_list:
         cid = c["id"]
         attrs = c.get("attributes", {})
-        send_date = attrs.get("send_time") or attrs.get("scheduled_at", "")
-        ctr = ctr_by_id.get(cid)
-        if send_date and ctr is not None:
-            results.append({"send_date": send_date, "ctr": ctr})
-    print(f"[klaviyo] send_time results: {len(results)} (ctr_by_id had {len(ctr_by_id)} entries)", flush=True)
+        send_date = attrs.get("scheduled_at", "")
+        stats = stats_by_id.get(cid)
+        if send_date and stats and stats["sends"] >= 100:
+            results.append({"send_date": send_date, "ctr": stats["ctr"], "sends": stats["sends"]})
+    print(f"[klaviyo] send_time results: {len(results)} (stats_by_id had {len(stats_by_id)} entries)", flush=True)
 
     if results:
         _cache_set("send_time_analysis", results)
